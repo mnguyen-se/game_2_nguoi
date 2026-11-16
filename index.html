@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="vi"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Đại chiến bánh bao</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#fff3d9;color:#302138;font-family:system-ui,sans-serif;text-align:center}main{width:min(720px,100%);margin:auto;padding:20px 14px}h1{font-size:clamp(1.9rem,7vw,4rem);letter-spacing:-.06em;margin:0}p{margin:10px 0 18px}.arena{display:grid;grid-template-columns:1fr 1fr;gap:12px}.player,.stage{border:3px solid #302138;border-radius:24px;box-shadow:0 5px #302138}.player{padding:12px;background:#ffd1b8}.player:last-child{background:#c9e7ff}.score{display:block;font-size:2.5rem;font-weight:900}.stage{margin:16px 0;background:#fffaf0;padding:16px;min-height:160px;display:grid;place-content:center}.stage.go{background:#c8f698}.stage.fake{background:#ffd0da}#food{font-size:3rem}#status{font-size:clamp(1rem,4vw,1.5rem);font-weight:850;min-height:2.5em;display:grid;place-items:center}button{font:inherit;font-weight:850;cursor:pointer;border:2px solid #302138;box-shadow:0 4px #302138;border-radius:14px;padding:11px 14px;touch-action:manipulation;color:#302138;background:#ffcc55}button:active{transform:translateY(3px);box-shadow:0 1px #302138}.grab{width:100%;min-height:54px;background:#fffaf0}kbd{display:block;font-size:.8rem;margin-top:4px}button:focus-visible{outline:3px solid #7850db;outline-offset:3px}[hidden]{display:none!important}.hint{font-size:.85rem;margin-top:20px}
+form{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px;margin-bottom:12px}input{max-width:150px;border:2px solid;border-radius:10px;padding:10px;font:inherit}button:disabled{opacity:.45;cursor:default}#room{font-weight:800;margin:8px 0}#error{color:#8c183a;margin:8px 0}</style>
+<main>
+<h1>Đại chiến bánh bao</h1>
+<p>Thấy 🥟 thì chộp. Thấy 🧦 thì né!</p>
+<p id="room" hidden></p><p id="error" role="alert" hidden></p><section class="stage" id="stage"><div id="food" aria-hidden="true">🥟</div><div id="status" role="status">Ai giành 5 điểm trước sẽ thắng!</div><form id="join">
+<label for="code">Mã phòng</label>
+<input id="code" maxlength="8" autocomplete="off" autocapitalize="characters" placeholder="Ví dụ A1B2C3D4">
+<button>Vào phòng</button>
+</form>
+<button id="create">Tạo phòng</button>
+<button id="restart" hidden>Chơi lại</button></section>
+<div class="arena">
+<section class="player"><strong>🐱 Mèo Cam</strong><output id="p0" class="score">0</output><button class="grab">Chộp! <kbd>Phím cách</kbd></button></section>
+<section class="player"><strong>🐸 Ếch Xanh</strong><output id="p1" class="score">0</output><button class="grab">Chộp! <kbd>Phím cách</kbd></button></section>
+</div>
+<p class="hint">Mỗi người dùng một thiết bị. Bấm sớm hoặc chộp tất thối sẽ tặng đối thủ 1 điểm.</p>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const names = ['🐱 Mèo Cam', '🐸 Ếch Xanh'];
+const buttons = [...document.querySelectorAll('.grab')];
+const storageKey = 'banh-bao-room';
+let session;
+try { session = JSON.parse(sessionStorage.getItem(storageKey)); } catch {}
+let state;
+let busy = false;
+let revision = 0;
+let timer;
+
+function error(message) {
+  $('error').textContent = message;
+  $('error').hidden = !message;
+}
+function render() {
+  const phase = state?.phase ?? 'idle';
+  $('stage').className = 'stage ' + phase;
+  $('food').textContent = { idle:'🥟', lobby:'⏳', wait:'🍽️', fake:'🧦', go:'🥟', break:'😋', end:'🏆' }[phase];
+  const last = state?.last;
+  const result = last?.good ? names[last.player] + ' chộp được bánh!' :
+    last ? names[last.player] + ' chộp hụt! ' + names[1 - last.player] + ' +1 điểm.' : '';
+  $('status').textContent = {
+    idle:'Ai giành 5 điểm trước sẽ thắng!',
+    lobby:'Gửi mã phòng cho bạn của bạn rồi chờ họ vào.',
+    wait:'Chờ bánh bao ra lò…',
+    fake:'Tất thối! Đừng chộp!',
+    go:'Chộp ngay!',
+    break:result,
+    end:state?.scores.includes(5) ? names[state.scores.indexOf(5)] + ' thắng!' : ''
+  }[phase];
+  $('create').hidden = $('join').hidden = !!session;
+  $('restart').hidden = phase !== 'end';
+  $('room').hidden = !session;
+  $('room').textContent = session ? 'Mã phòng ' + session.code + (state ? ' · Bạn là ' + names[state.player] : '') : '';
+  buttons.forEach((button, player) => {
+    $('p' + player).textContent = state?.scores[player] ?? 0;
+    button.disabled = player !== state?.player || !['wait','fake','go'].includes(phase);
+  });
+}
+async function api(action, fields) {
+  const response = await fetch('/api/room', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json' },
+    body:JSON.stringify({ action, ...fields }),
+    signal:AbortSignal.timeout(7000)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw Object.assign(new Error(data.error || 'Máy chủ chưa sẵn sàng.'), { status:response.status });
+  return data;
+}
+function poll(delay = 220) {
+  clearTimeout(timer);
+  if (!session) return;
+  timer = setTimeout(async () => {
+    if (busy) return poll();
+    const current = revision;
+    let next = 220;
+    try {
+      const data = await api('state', session);
+      if (current !== revision) return;
+      if (state?.phase !== data.phase || state?.last?.at !== data.last?.at || !state) {
+        state = data;
+        render();
+      }
+      if (data.phase === 'lobby' || data.phase === 'end') next = 1200;
+      error('');
+    } catch (failure) {
+      if (current !== revision) return;
+      if ([403,404].includes(failure.status)) {
+        session = state = null;
+        sessionStorage.removeItem(storageKey);
+        render();
+      }
+      error(failure.message);
+      next = 1500;
+    }
+    poll(next);
+  }, delay);
+}
+async function act(action, code) {
+  if (busy) return;
+  busy = true;
+  revision++;
+  clearTimeout(timer);
+  error('');
+  try {
+    const data = await api(action, session ?? { code });
+    if (action === 'create' || action === 'join') {
+      session = { code: data.code ?? code, secret: data.secret };
+      sessionStorage.setItem(storageKey, JSON.stringify(session));
+    }
+    state = data;
+    render();
+  } catch (failure) {
+    error(failure.message);
+  } finally {
+    busy = false;
+    poll();
+  }
+}
+$('create').onclick = () => act('create');
+$('join').onsubmit = event => {
+  event.preventDefault();
+  act('join', $('code').value.trim().toUpperCase());
+};
+$('restart').onclick = () => act('restart');
+buttons.forEach(button => button.onclick = () => act('grab'));
+window.addEventListener('keydown', event => {
+  if (event.code !== 'Space' || event.repeat || event.target.closest?.('button,input')) return;
+  const button = buttons[state?.player];
+  if (button && !button.disabled) {
+    event.preventDefault();
+    act('grab');
+  }
+});
+render();
+poll(0);
+</script>
+</html>
